@@ -1,7 +1,7 @@
-import os, json
-from flask import Flask, request, jsonify, render_template
+import os, json, requests
+from flask import Flask, request, jsonify, render_template, send_file
 import auth_gateway
-import task_gateway
+import key_gateway
 from flask_mysqldb import MySQL
 import hashlib
 
@@ -31,142 +31,98 @@ mysql = MySQL(gateway)
 def hello():
     return 'Hello'
 
-@gateway.route("/signup")
-def register_show():
-    return render_template('signup.html')
+@gateway.route('/certificate')
+def return_cert():
+    cert_file = './certificate.crt'
+    response = send_file(cert_file, as_attachment=True)
+    response.headers['Content-Disposition'] = 'attachment; filename="certificate.crt"'
+    response.status_code = 200
+    return response
+
+@gateway.route("/session", methods=["POST"])
+def session_signup():
+    # Bên nhận request public key từ server
+    print(request)
+    result, err =key_gateway.create_session(request)
+    if not err:
+        return result, 201
+        
+    return err
+
 
 @gateway.route("/signup", methods=["POST"])
-def register():
-    print(request)
-    res, err = auth_gateway.register(request)
-    if not err:
-        return res
-    else:
-        return err
-
+def signup():
+    return_data, err = key_gateway.check_session(request)
+    result, err = auth_gateway.signup(return_data)
+    res1, err1 = key_gateway.delete_session(request)
+    if not err and not err1:
+        return result, 201
+    return "Failed to signup", 500
+    
 @gateway.route("/login")
-def login_show():
+def show_login():
     return render_template('login.html')
 
 @gateway.route("/login", methods=["POST"])
 def login():
-    token, err = auth_gateway.login(request)
-    print(f"Token: {token}")
-    if not err:
-        #hash the token
-        sha = hashlib.sha3_256()
-        sha.update(bytes(token, "utf-8"))
-        opaque = sha.hexdigest()
+    #Get session_id and username
+    data= request.get_json()
+    session_id = data["id"]
+    username = data["username"]
+    # Check already login
+    cur= mysql.connection.cursor()
+    res=cur.execute(
+        f"select * from session_management where username=%s",(username,)
+    )
+    print(res)
+    if res>0:
+        res1, err1 = key_gateway.delete_session(request)
+        return "Already logined!", 301
 
-        #insert into database
-        cur = mysql.connection.cursor()
-        res = cur.execute(
-            "INSERT INTO opaque (auth_key, opaque_key) VALUES (%s, %s)", (token, opaque,)
+    # Check session_id to use the right K to decrypt password
+    return_data, err = key_gateway.check_session(request)
+    result, err = auth_gateway.login(return_data)
+    if not err:
+        input= json.loads(result)
+        username = input["username"]
+        user_id =  input["id"]
+        res=cur.execute(
+            f"insert into session_management (session_id, user_id, username) values(%s, %s, %s) ", 
+            (session_id, user_id, username, )
         )
         mysql.connection.commit()
-        return opaque
-    else:
-        return err
+        return "Login successfully!", 201
 
+    mysql.connection.commit()
+    cur.close()
+    return "Failed to login!", 500
 
-@gateway.route("/create", methods=["POST"])
-def create():
-    opaque = request.headers["Authorization"]
-
-    print(f"Opaque: {opaque}")
-    cursor = mysql.connection.cursor()
-    # Check if the task exists
-    query = "SELECT auth_key FROM opaque WHERE opaque_key = %s"
-    cursor.execute(query, (opaque,))
-    token = cursor.fetchone()
-    print(token)
-    token = token[0]
-
-    access, err = auth_gateway.token_check(request, token)
-    if err:
-        return err
-
-    access = json.loads(access)
-
-    if access["admin"]:
-        task.create(request, access["id"])
-
-        return "success!", 200
-    else:
-        return "not authorized", 401
     
-@gateway.route("/delete/<int:task_id>", methods=["DELETE"])
-def delete(task_id):
-    opaque = request.headers["Authorization"]
-    cursor = mysql.connection.cursor()
-    # Check if the task exists
-    query = "SELECT auth_key FROM opaque WHERE opaque_key = %s "
-    cursor.execute(query, (opaque,))
-    token = cursor.fetchone()
-    token = token[0]
-
-    access, err = auth_gateway.token_check(request, token)
-    if err:
-        return err
-
-    access = json.loads(access)
-
-    if access["admin"]:
-        task.remove(request, access["id"], task_id)
-
-        return "success!", 200
-    else:
-        return "not authorized", 401
-
-@gateway.route("/retrival", methods=["GET"])
-def retrieval():
-    opaque = request.headers["Authorization"]
-    cursor = mysql.connection.cursor()
-    # Check if the task exists
-    query = "SELECT auth_key FROM opaque WHERE opaque_key = %s "
-    cursor.execute(query, (opaque,))
-    token = cursor.fetchone()
-    token = token[0]
-
-    access, err = auth_gateway.token_check(request, token)
-
-    if err:
-        return err
-
-    access = json.loads(access)
-
-    if access["admin"]:
-        data = task.get(request, access["id"])
-        print(data)
-        return jsonify(data), 200
-    else:
-        return "not authorized", 401
-
-
-@gateway.route("/logout", methods=["GET"])
-def logout():
-    opaque = request.headers["Authorization"]
-    cursor = mysql.connection.cursor()
-    # Check if the task exists
-    query = "SELECT auth_key FROM opaque WHERE opaque_key = %s "
-    cursor.execute(query, (opaque,))
-    token = cursor.fetchone()
-    token = token[0]
-
-    access, err = auth_gateway.token_check(request, token)
-
-    if err:
-        return err
-
-    access = json.loads(access)
-
-    if access["admin"]:
-        query = "DELETE FROM opaque WHERE opaque_key = %s "
-        cursor.execute(query, (opaque,))
+@gateway.route("/logout/<int:id>", methods=["POST"])
+def logout(id):
+    cur= mysql.connection.cursor()
+    res=cur.execute(
+        f"select * from session_management where session_id=%s",(id,)
+    )
+    res_del=None
+    if(res>0):
+        res_del = cur.execute(
+            f"delete from session_management where session_id=%s", (id,)
+        )
         mysql.connection.commit()
-        cursor.close()
-        return "Success for deleting", 200
-    return "failure", 500
+    mysql.connection.commit()
+    cur.close()
+
+    response = requests.delete(
+        f"http://127.0.0.1:2000/remove/{id}",
+    )
+    
+    print(response.text)
+
+    if res > 0:
+        return "Log out successfully!", 200
+    return "Failed to log out!", 404
+
 
 context = ('./certificate.crt', './private_key.key')
 

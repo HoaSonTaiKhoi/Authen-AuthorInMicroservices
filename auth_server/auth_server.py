@@ -1,9 +1,9 @@
 import jwt, datetime, os, json
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from flask_mysqldb import MySQL 
 
 auth_server = Flask(__name__)
-jwt_secret = '7b8c6ef87a5d4e3e2b1a0d9c8b7a6f5e'
+# jwt_secret = '7b8c6ef87a5d4e3e2b1a0d9c8b7a6f5e'
 
 #function loadconfig
 def load_mysql_config(filename="./db_config.json"):
@@ -27,85 +27,60 @@ def index():
     return "Welcome!"
 
 # Routes
-@auth_server.route("/register", methods=['POST'])
-def register():
+@auth_server.route("/signup", methods=['POST'])
+def signup():
     auth = request.authorization
-    print(request)
     if not auth:
         return "missing information", 400
     
-    #insert into database
+    # check if existed  
     cur = mysql.connection.cursor()
-    res = cur.execute(
-        "insert into users (username, password) values (%s, %s)", (auth.username,auth.password,)
+    result = cur.execute(
+        "SELECT * FROM users WHERE username=%s", (auth.username,)
+    )
+    if(result >0 ):
+        return "Account existed!", 401
+        
+    #insert into database
+    result = cur.execute(
+        "insert into users (username, password, rule) values (%s, %s, %s)", (auth.username,auth.password,0,)
     )
     mysql.connection.commit()
 
-    if res > 0:
-        return "Register successfully!", 201
+    if result > 0:
+        return "Sign Up successfully!", 201
     return "Failed to Register", 500
 
 @auth_server.route("/login", methods=["POST"])
 def login():
     auth = request.authorization
+    # print(auth)
     if not auth:
-        return "missing credentials", 401
+        return "Missing information", 400
 
     # check db for username and password
     cur = mysql.connection.cursor()
-    res = cur.execute(
+    result = cur.execute(
         "SELECT * FROM users WHERE username=%s", (auth.username,)
     )
 
-    if res > 0:
+    if result > 0:
         user_row = cur.fetchone()
         id =  user_row[0]
         username = user_row[1]
         password = user_row[2]
-
-        if auth.username != username or auth.password != password:
-            return "invalid credentials", 401
-        else:
-            return createJWT(id, jwt_secret, True)
-    else:
-        return "invalide credentials", 401
-
-
-@auth_server.route("/validate", methods=["POST"])
-def validate():
-    encoded_jwt = request.headers["Authorization"]
-
-    print(encoded_jwt)
-
-    if not encoded_jwt:
-        return "missing credentials", 401
-
-    try:
-        decoded = jwt.decode(
-            encoded_jwt, jwt_secret, algorithms=["HS256"]
-        )
-    except:
-        return "not authorized", 403
+        rule=user_row[3]
         
-    print(f"Decoded: {decoded}")
-    return decoded, 200
-
-
-def createJWT(id, secret, authz):
-
-    payload =         {
-            "id": id,
-            "exp": datetime.datetime.now(tz=datetime.timezone.utc)
-            + datetime.timedelta(days=1),
-            "iat": datetime.datetime.utcnow(),
-            "admin": authz,
-        }
-
-    return jwt.encode(
-        payload,
-        secret,
-        algorithm="HS256",
-    )
+        if auth.username != username or auth.password != password:
+            return "Username or Password not fit!", 401
+        else:
+            data={
+                "id" : id,
+                "username": username
+            }
+            return jsonify(data), 201
+    else:
+        return "User doesn't exist!", 401
 
 context = ('./certificate.crt', './private_key.key')
 
